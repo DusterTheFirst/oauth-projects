@@ -1,0 +1,3 @@
+[workspace]
+members = ["token-manager-rpc", "token-manager-server"]
+resolver = "3"
