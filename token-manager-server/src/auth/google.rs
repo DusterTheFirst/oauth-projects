@@ -12,9 +12,9 @@ use oauth2::{
     TokenResponse as _, TokenUrl, basic::BasicClient,
 };
 use serde_derive::{Deserialize, Serialize};
-use time::Timestamp;
+use time::OffsetDateTime;
 
-use crate::{ClientIdSecret, RouterState, TokenState};
+use crate::{ClientIdSecret, RouterState, state::TokenState};
 
 #[derive(Clone, Debug)]
 pub struct GoogleOauthClient(
@@ -94,6 +94,7 @@ pub async fn complete_youtube_oauth(
     State(RouterState {
         google_oauth,
         reqwest_client,
+        app_state,
         ..
     }): State<RouterState>,
     jar: PrivateCookieJar,
@@ -127,7 +128,7 @@ pub async fn complete_youtube_oauth(
         .await
         .unwrap();
 
-    let acquired_at = Timestamp::now();
+    let acquired_at = OffsetDateTime::now_utc();
     let Some(expires_at) = token_response
         .expires_in()
         .map(|expires_in| acquired_at + expires_in)
@@ -151,6 +152,13 @@ pub async fn complete_youtube_oauth(
         expires_at,
         access_token,
         refresh_token,
+    };
+
+    if let Err(error) = app_state.insert_youtube_token(token_state).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to save youtube token: {error:?}"),
+        ));
     };
 
     Ok((jar.remove(COOKIE_NAME), Redirect::to("/")))
