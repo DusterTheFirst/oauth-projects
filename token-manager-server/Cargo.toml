@@ -8,6 +8,7 @@ anyhow = "1.0.103"
 atomic-write-file = "0.3.0"
 axum = "0.8.9"
 axum-extra = { version = "0.12.6", features = ["cookie-private"] }
+axum-macros = "0.5.1"
 chacha20poly1305 = "0.11.0"
 hex = "0.4.3"
 listenfd = "1.0.2"
@@ -15,7 +16,7 @@ oauth2 = { version = "5.0.0", features = ["reqwest"] }
 rand = "0.10.2"
 serde = "1.0.228"
 serde_derive = "1.0.228"
-time = "0.3.53"
+time = { version = "0.3.53", features = ["serde"] }
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-macros = "2.7.0"
 tokio-util = "0.7.18"
