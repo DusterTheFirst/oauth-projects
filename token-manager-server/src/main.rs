@@ -11,12 +11,13 @@ use axum_extra::extract::cookie::Key;
 use listenfd::{self, ListenFd};
 use oauth2::{AuthUrl, ClientId, ClientSecret, RevocationUrl, Scope, TokenUrl, reqwest};
 use serde_derive::Deserialize;
+use time::OffsetDateTime;
 use tokio::fs;
 
 use crate::{
     activity_tracker::{ActivityTracker, idle_tracking_middleware, watchdog},
     auth::{complete_auth, get_or_refresh_token, oauth_client, start_auth},
-    state::AppState,
+    state::{AppState, TokenState},
 };
 
 mod activity_tracker;
@@ -119,14 +120,43 @@ async fn main() -> anyhow::Result<()> {
                 "/",
                 get(|State(router_state): State<RouterState>| async move {
                     Html({
-                        let mut providers = router_state.oauth.keys().collect::<Vec<_>>();
-                        providers.sort_unstable();
+                        let mut authenticated_providers = router_state
+                            .app_state
+                            .token_states()
+                            .await
+                            .into_iter()
+                            .collect::<Vec<_>>();
+                        authenticated_providers.sort_unstable_by_key(|p| p.0.clone());
 
-                        providers
-                            .iter()
-                            .map(|p| format!("<a href=\"/login/{p}\">{p} Login</a>"))
-                            .collect::<Vec<_>>()
-                            .join("<br/>")
+                        let mut configured_providers =
+                            router_state.oauth.keys().collect::<Vec<_>>();
+                        configured_providers.sort_unstable();
+
+                        format!("<!doctype html> Now: {}<br>", OffsetDateTime::now_utc())
+                            + &authenticated_providers
+                                .iter()
+                                .map(
+                                    |(
+                                        p,
+                                        TokenState {
+                                            acquired_at,
+                                            expires_at,
+                                            ..
+                                        },
+                                    )| {
+                                        format!("<span>{p} {acquired_at} -&gt; {expires_at}</span>")
+                                    },
+                                )
+                                .collect::<Vec<_>>()
+                                .join("<br>")
+                            + "<br>"
+                            + &configured_providers
+                                .iter()
+                                .map(|p| {
+                                    format!("<a href=\"/login/{p}\">authenticate with {p}</a>")
+                                })
+                                .collect::<Vec<_>>()
+                                .join("<br>")
                     })
                 }),
             )

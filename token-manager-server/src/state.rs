@@ -47,9 +47,9 @@ pub struct TokenState {
 }
 
 impl AppState {
-    // pub async fn providers(&self) -> Vec<String> {
-    // self.data.lock().await.tokens.keys().cloned().collect()
-    // }
+    pub async fn token_states(&self) -> HashMap<String, TokenState> {
+        self.data.lock().await.tokens.clone()
+    }
 
     pub async fn insert_token(
         &self,
