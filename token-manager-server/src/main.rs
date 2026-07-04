@@ -1,22 +1,22 @@
-use std::{env, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, env, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use axum::{
     Router,
-    extract::{FromRef, State},
+    extract::{FromRef, Path, State},
     http::StatusCode,
     response::Html,
     routing::get,
 };
 use axum_extra::extract::cookie::Key;
 use listenfd::{self, ListenFd};
-use oauth2::{ClientId, ClientSecret, reqwest};
+use oauth2::{AuthUrl, ClientId, ClientSecret, RevocationUrl, Scope, TokenUrl, reqwest};
 use serde_derive::Deserialize;
 use tokio::fs;
 
 use crate::{
     activity_tracker::{ActivityTracker, idle_tracking_middleware, watchdog},
-    auth::google::{self, GoogleOauthClient, complete_youtube_oauth, start_youtube_oauth},
+    auth::{complete_auth, oauth_client, start_auth},
     state::AppState,
 };
 
@@ -26,14 +26,37 @@ mod state;
 
 #[derive(Deserialize)]
 struct OauthConfig {
-    youtube: ClientIdSecret,
-    spotify: ClientIdSecret,
+    #[serde(flatten)]
+    providers: HashMap<String, OauthProviderConfig>,
 }
 
 #[derive(Deserialize)]
-struct ClientIdSecret {
+struct OauthProviderConfig {
+    #[serde(flatten)]
+    static_config: OauthStaticConfig,
+    #[serde(flatten)]
+    dynamic_config: OauthDynamicConfig,
+}
+
+/// Configuration that is static per provider
+#[derive(Deserialize)]
+struct OauthStaticConfig {
     client_id: ClientId,
     client_secret: ClientSecret,
+
+    auth_url: AuthUrl,
+    token_url: TokenUrl,
+    revocation_url: Option<RevocationUrl>,
+}
+
+/// Configuration that is allowed to change between authorization requests
+///
+/// Maybe in the future the token requestor can set these
+#[derive(Clone, Deserialize)]
+struct OauthDynamicConfig {
+    scope: Vec<Scope>,
+    #[serde(default)]
+    extra: HashMap<String, String>,
 }
 
 #[tokio_macros::main]
@@ -71,9 +94,6 @@ async fn main() -> anyhow::Result<()> {
     let oauth_root =
         env::var("OAUTH_REDIRECT_ROOT").context("env OAUTH_REDIRECT_ROOT should be set")?;
 
-    let google_oauth = google::oauth_client(oauth_config.youtube, &oauth_root)
-        .context("google oauth client should be configured")?;
-
     let mut listenfd = ListenFd::from_env();
     let web_listener = listenfd
         .take_tcp_listener(0)
@@ -98,15 +118,22 @@ async fn main() -> anyhow::Result<()> {
         Router::new()
             .route(
                 "/",
-                get(|| async { Html("<a href=\"/login/youtube\">Youtube Login</a>") }),
+                get(|State(router_state): State<RouterState>| async move {
+                    Html({
+                        let mut providers = router_state.oauth.keys().collect::<Vec<_>>();
+                        providers.sort_unstable();
+
+                        providers.iter().map(|p| format!("<a href=\"/login/{p}\">{p} Login</a>")).collect::<Vec<_>>().join("<br/>")
+                    })
+                }),
             )
-            .route("/login/youtube", get(start_youtube_oauth))
-            .route("/oauth/google", get(complete_youtube_oauth))
+            .route("/login/{provider}", get(start_auth))
+            .route("/oauth/{provider}", get(complete_auth))
             .route(
-                "/token/youtube",
-                get(|State(app_state): State<Arc<AppState>>| async move {
+                "/token/{provider}",
+                get(|Path(provider): Path<String>, State(app_state): State<Arc<AppState>>| async move {
                     match app_state
-                        .get_youtube_token(async |token_state| todo!())
+                        .get_token(provider, async |token_state| todo!())
                         .await
                     {
                         Ok(token) => Ok(format!("{token:?}")),
@@ -116,12 +143,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }),
             )
-            .route("/login/spotify", get(|| async {}))
-            .route("/oauth/spotify", get(|| async {}))
-            .route("/token/spotify", get(|| async {}))
             .with_state(RouterState {
                 cookie_key,
-                google_oauth,
+                oauth: oauth_config.providers.into_iter()
+                    .map(|(name, config)|
+                        oauth_client(&name, config.static_config, &oauth_root)
+                            .with_context(|| format!("configuring provider {name:?}"))
+                            .map(|oauth| (name, (oauth, config.dynamic_config)))
+                    ).collect::<anyhow::Result<HashMap<_,_>>>()?,
                 reqwest_client,
                 app_state: Arc::new(app_state),
             })
@@ -143,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Clone)]
 struct RouterState {
     cookie_key: Key,
-    google_oauth: GoogleOauthClient,
+    oauth: HashMap<String, (auth::OauthClient, OauthDynamicConfig)>,
     reqwest_client: reqwest::Client,
     app_state: Arc<AppState>,
 }

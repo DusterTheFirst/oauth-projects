@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::{ErrorKind, Write},
     ops::Deref,
     path::{Path, PathBuf},
@@ -28,8 +29,7 @@ pub struct AppState {
 
 #[derive(Deserialize, Serialize)]
 struct AppStateOnDisk {
-    youtube: Option<TokenState>,
-    spotify: Option<TokenState>,
+    tokens: HashMap<String, TokenState>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -47,34 +47,53 @@ pub struct TokenState {
 }
 
 impl AppState {
-    pub async fn insert_youtube_token(&self, token_state: TokenState) -> anyhow::Result<()> {
+    // pub async fn providers(&self) -> Vec<String> {
+    // self.data.lock().await.tokens.keys().cloned().collect()
+    // }
+
+    pub async fn insert_token(
+        &self,
+        provider: String,
+        token_state: TokenState,
+    ) -> anyhow::Result<()> {
         let mut data = self.data.lock().await;
-        data.youtube = Some(token_state);
+        data.tokens.insert(provider, token_state);
 
         Self::save_to_disk(&self.key, &self.path, &data).context("saving new state to file")
     }
 
-    pub async fn get_youtube_token(
+    pub async fn get_token(
         &self,
+        provider: String,
         refresh: impl AsyncFn(&TokenState) -> anyhow::Result<Option<TokenState>>,
     ) -> anyhow::Result<Option<AccessToken>> {
         let mut data = self.data.lock().await;
 
-        let Some(youtube) = &mut data.youtube else {
+        let Some(token) = data.tokens.get(&provider) else {
             return Ok(None);
         };
 
-        if youtube.expires_at > (Timestamp::now() + Duration::from_mins(1)) {
-            return Ok(Some(youtube.access_token.clone()));
+        if token.expires_at > (Timestamp::now() + Duration::from_mins(1)) {
+            return Ok(Some(token.access_token.clone()));
         }
 
-        data.youtube = refresh(youtube)
+        let access_token = if let Some(token) = refresh(token)
             .await
-            .context("should refresh youtube token")?;
+            .context("should refresh youtube token")?
+        {
+            let access_token = token.access_token.clone();
+            data.tokens.insert(provider, token);
+
+            Some(access_token)
+        } else {
+            data.tokens.remove(&provider);
+
+            None
+        };
 
         Self::save_to_disk(&self.key, &self.path, &data).context("saving new state to file")?;
 
-        Ok(data.youtube.as_ref().map(|yt| yt.access_token.clone()))
+        Ok(access_token)
     }
 
     fn save_to_disk(
@@ -114,8 +133,7 @@ impl AppState {
                     path,
                     key,
                     data: Mutex::new(AppStateOnDisk {
-                        spotify: None,
-                        youtube: None,
+                        tokens: HashMap::default(),
                     }),
                 });
             }
@@ -127,7 +145,7 @@ impl AppState {
         let mut nonce = [0; size_of::<Nonce>()];
         file.read_exact(&mut nonce)
             .await
-            .context("reading app state nonce");
+            .context("reading app state nonce")?;
         let nonce = Nonce::from(nonce);
 
         let mut ciphertext = Vec::new();
