@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     io::{ErrorKind, Write},
     ops::Deref,
     path::{Path, PathBuf},
@@ -32,7 +32,7 @@ struct AppStateOnDisk {
     tokens: HashMap<String, TokenState>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct TokenState {
     /// The initial acquisition timestamp
     #[serde(with = "time::serde::rfc3339")]
@@ -65,26 +65,25 @@ impl AppState {
     pub async fn get_token(
         &self,
         provider: String,
-        refresh: impl AsyncFn(&TokenState) -> anyhow::Result<Option<TokenState>>,
-    ) -> anyhow::Result<Option<AccessToken>> {
+        refresh: impl AsyncFn(TokenState) -> anyhow::Result<Option<TokenState>>,
+    ) -> anyhow::Result<Option<TokenState>> {
         let mut data = self.data.lock().await;
 
-        let Some(token) = data.tokens.get(&provider) else {
+        let Entry::Occupied(token) = data.tokens.entry(provider.clone()) else {
             return Ok(None);
         };
 
-        if token.expires_at > (Timestamp::now() + Duration::from_mins(1)) {
-            return Ok(Some(token.access_token.clone()));
+        if token.get().expires_at > (Timestamp::now() + Duration::from_mins(5)) {
+            return Ok(Some(token.get().clone()));
         }
 
-        let access_token = if let Some(token) = refresh(token)
+        let token = if let Some(token) = refresh(token.remove())
             .await
             .context("should refresh youtube token")?
         {
-            let access_token = token.access_token.clone();
-            data.tokens.insert(provider, token);
+            data.tokens.insert(provider, token.clone());
 
-            Some(access_token)
+            Some(token)
         } else {
             data.tokens.remove(&provider);
 
@@ -93,7 +92,7 @@ impl AppState {
 
         Self::save_to_disk(&self.key, &self.path, &data).context("saving new state to file")?;
 
-        Ok(access_token)
+        Ok(token)
     }
 
     fn save_to_disk(

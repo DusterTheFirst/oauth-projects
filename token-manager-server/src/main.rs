@@ -3,8 +3,7 @@ use std::{collections::HashMap, env, path::PathBuf, sync::Arc, time::Duration};
 use anyhow::Context;
 use axum::{
     Router,
-    extract::{FromRef, Path, State},
-    http::StatusCode,
+    extract::{FromRef, State},
     response::Html,
     routing::get,
 };
@@ -16,7 +15,7 @@ use tokio::fs;
 
 use crate::{
     activity_tracker::{ActivityTracker, idle_tracking_middleware, watchdog},
-    auth::{complete_auth, oauth_client, start_auth},
+    auth::{complete_auth, get_or_refresh_token, oauth_client, start_auth},
     state::AppState,
 };
 
@@ -123,34 +122,28 @@ async fn main() -> anyhow::Result<()> {
                         let mut providers = router_state.oauth.keys().collect::<Vec<_>>();
                         providers.sort_unstable();
 
-                        providers.iter().map(|p| format!("<a href=\"/login/{p}\">{p} Login</a>")).collect::<Vec<_>>().join("<br/>")
+                        providers
+                            .iter()
+                            .map(|p| format!("<a href=\"/login/{p}\">{p} Login</a>"))
+                            .collect::<Vec<_>>()
+                            .join("<br/>")
                     })
                 }),
             )
             .route("/login/{provider}", get(start_auth))
             .route("/oauth/{provider}", get(complete_auth))
-            .route(
-                "/token/{provider}",
-                get(|Path(provider): Path<String>, State(app_state): State<Arc<AppState>>| async move {
-                    match app_state
-                        .get_token(provider, async |token_state| todo!())
-                        .await
-                    {
-                        Ok(token) => Ok(format!("{token:?}")),
-                        Err(error) => {
-                            Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{error:?}")))
-                        }
-                    }
-                }),
-            )
+            .route("/token/{provider}", get(get_or_refresh_token))
             .with_state(RouterState {
                 cookie_key,
-                oauth: oauth_config.providers.into_iter()
-                    .map(|(name, config)|
+                oauth: oauth_config
+                    .providers
+                    .into_iter()
+                    .map(|(name, config)| {
                         oauth_client(&name, config.static_config, &oauth_root)
                             .with_context(|| format!("configuring provider {name:?}"))
                             .map(|oauth| (name, (oauth, config.dynamic_config)))
-                    ).collect::<anyhow::Result<HashMap<_,_>>>()?,
+                    })
+                    .collect::<anyhow::Result<HashMap<_, _>>>()?,
                 reqwest_client,
                 app_state: Arc::new(app_state),
             })

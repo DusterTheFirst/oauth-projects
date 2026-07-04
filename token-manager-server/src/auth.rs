@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::SystemTime};
 
 use anyhow::Context as _;
 use axum::{
@@ -6,7 +6,11 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Redirect},
 };
-use axum_extra::extract::cookie::{Cookie, PrivateCookieJar, SameSite};
+use axum_extra::{
+    TypedHeader,
+    extract::cookie::{Cookie, PrivateCookieJar, SameSite},
+    headers,
+};
 use oauth2::{
     AuthorizationCode, CsrfToken, EndpointMaybeSet, EndpointNotSet, EndpointSet, RedirectUrl,
     TokenResponse as _, basic::BasicClient,
@@ -18,7 +22,7 @@ use crate::{OauthStaticConfig, RouterState, state::TokenState};
 
 #[derive(Clone, Debug)]
 pub struct OauthClient(
-    Arc<BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointMaybeSet, EndpointSet>>,
+    pub Arc<BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointMaybeSet, EndpointSet>>,
 );
 
 pub fn oauth_client(
@@ -163,4 +167,50 @@ pub async fn complete_auth(
     };
 
     Ok((jar.remove(cookie_name), Redirect::to("/")))
+}
+
+pub async fn get_or_refresh_token(
+    Path(provider): Path<String>,
+    State(router_state): State<RouterState>,
+) -> impl IntoResponse {
+    match router_state
+        .app_state
+        .get_token(provider.clone(), async move |token_state| {
+            let Some((OauthClient(oauth), _)) = router_state.oauth.get(&provider) else {
+                eprintln!(
+                    "attempted to refresh token but no oauth provider found. Check your config"
+                );
+                return Ok(None);
+            };
+
+            let token = oauth
+                .exchange_refresh_token(&token_state.refresh_token)
+                .request_async(&router_state.reqwest_client)
+                .await
+                .context("refreshing access token")?;
+
+            Ok(Some(TokenState {
+                access_token: token.access_token().clone(),
+                refresh_token: token
+                    .refresh_token()
+                    .cloned()
+                    .unwrap_or(token_state.refresh_token),
+                expires_at: OffsetDateTime::now_utc()
+                    + token
+                        .expires_in()
+                        .context("reading expires_in from token refresh response")?,
+                ..token_state
+            }))
+        })
+        .await
+    {
+        Ok(None) => Err((StatusCode::NOT_FOUND, String::new())),
+        Ok(Some(token)) => Ok((
+            TypedHeader(headers::Expires::from(
+                SystemTime::UNIX_EPOCH + (token.expires_at - OffsetDateTime::UNIX_EPOCH),
+            )),
+            token.access_token.into_secret(),
+        )),
+        Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{error:?}"))),
+    }
 }
